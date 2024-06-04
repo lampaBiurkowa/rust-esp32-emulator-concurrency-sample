@@ -1,64 +1,55 @@
-#![no_std]
-#![no_main]
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use esp_idf_svc::hal::{
+    peripherals::Peripherals,
+    gpio::*,
+    prelude::*,
+};
 
-use arduino_hal::prelude::*;
-use panic_halt as _;
+fn main() {
+    esp_idf_svc::sys::link_patches();
 
-const EEPROM_ADDRESS: u8 = 0x50;
-const BYTE_TO_SET: u16 = 0;
-const VALUE_TO_WRITE: u8 = 0x46;
+    let shared_data = Arc::new(Mutex::new(0));
+    let peripherals = Peripherals::take().unwrap();
+    let mut pins = peripherals.pins;
 
-#[arduino_hal::entry]
-fn main() -> ! {
-    let dp = arduino_hal::Peripherals::take().unwrap();
-    let pins = arduino_hal::pins!(dp);
+    let shared_data1 = Arc::clone(&shared_data);
+    let handle1 = thread::spawn(move || {
+        let pin1 = &mut pins.gpio2;
+        for _ in 0..10 {
+            increment_thread_safe("Task 1", shared_data1.clone());
+            blink_led(pin1);
+        }
+    });
 
-    let mut serial = arduino_hal::default_serial!(dp, pins, 57600);
-    ufmt::uwriteln!(&mut serial, "Initializing...").unwrap();
+    let shared_data2 = Arc::clone(&shared_data);
+    let handle2 = thread::spawn(move || {
+        let pin2 = &mut pins.gpio4;
+        for _ in 0..10 {
+            increment_thread_safe("Task 2", shared_data2.clone());
+            blink_led(pin2);
+        }
+    });
 
-    let mut i2c = arduino_hal::I2c::new(
-        dp.TWI,
-        pins.a4.into_pull_up_input(),
-        pins.a5.into_pull_up_input(),
-        50000
-    );
+    handle1.join().unwrap();
+    handle2.join().unwrap();
 
-    let mut delay = arduino_hal::Delay::new();
-    write_byte_eeprom(&mut i2c, &mut delay, BYTE_TO_SET, VALUE_TO_WRITE).unwrap();
-
-    let mut read_byte: u8 = 0;
-    read_byte_eeprom(&mut i2c, BYTE_TO_SET, &mut read_byte).unwrap();
-
-    ufmt::uwriteln!(&mut serial, "Read byte: 0x{:X}\r", read_byte).unwrap();
-
-    loop {}
+    println!("Final value: {}", *shared_data.lock().unwrap());
 }
 
-fn write_byte_eeprom(
-    i2c: &mut arduino_hal::I2c,
-    delay: &mut arduino_hal::Delay,
-    address: u16,
-    data: u8,
-) -> Result<(), arduino_hal::i2c::Error> {
-    let (addr_high, addr_low) = to_high_low(address);
-    i2c.write(EEPROM_ADDRESS, &[addr_high, addr_low, data])?;
-    delay.delay_ms(5u16); //otherwise it ends prematurly...
-    Ok(())
+fn increment_thread_safe(thread_name: &str, thread_arc: Arc<Mutex<i32>>) {
+    //in brackets in order to release the lock after increment
+    {
+        let mut data = thread_arc.lock().unwrap();
+        *data += 1;
+        println!("{}: {}", thread_name, *data);
+    }
 }
 
-fn read_byte_eeprom(
-    i2c: &mut arduino_hal::I2c,
-    address: u16,
-    buffer: &mut u8,
-) -> Result<(), arduino_hal::i2c::Error> {
-    let (addr_high, addr_low) = to_high_low(address);
-    i2c.write(EEPROM_ADDRESS, &[addr_high, addr_low])?;
-    i2c.read(EEPROM_ADDRESS, core::slice::from_mut(buffer))?;
-    Ok(())
-}
-
-fn to_high_low(address: u16) -> (u8, u8) {
-    let addr_high = (address >> 8) as u8;
-    let addr_low = (address & 0xFF) as u8;
-    (addr_high, addr_low)
+fn blink_led<P>(pin: &mut P) where P: OutputPin {
+    let mut led = PinDriver::output(pin).unwrap();
+    led.set_low().unwrap();
+    thread::sleep(Duration::from_millis(1000));
+    led.set_high().unwrap();
 }
